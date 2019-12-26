@@ -2,33 +2,39 @@
 
 import logging
 import redis
+import fake_useragent
+import  os
 
 from newSpider.KeenDBUtill import KeenDBUtill
 from newSpider.KeenRedisUtill import KeenRedisUtill
+
+from newSpider.CONSTANT import *
 
 
 class makeList(object):
 
     #任务列表表前缀
-    TABLE_NAME_PREFIX="tb_list_{}"
-    REDIS_PREFIX="list_{}"
+    # TABLE_NAME_PREFIX="tb_list_{}"
+    # REDIS_PREFIX="list_{}"
 
-    def __init__(self,start,end,totalPage,cnt=50):
+    def __init__(self,start,end,totalCnt,totalPage,cnt=50):
         """
         @param start: 专利开始的时间点
         @param end:   专利结束的时间点
         @param totalPage: 在start-end这个区间内共有多少个专利
+        @param totalPage: 在start-end这个区间内共有多少页专利
         @param cnt: 每页多少个专利，默认50个
         """
 
         self.start = start
         self.end = end
         self.totalPage = totalPage
+        self.totalCnt = totalCnt
         self.cnt = cnt
         #mysql表名称
-        self.mysql_table_name = makeList.TABLE_NAME_PREFIX.format(self.start)
+        self.mysql_table_name = TABLE_NAME_PREFIX.format(self.start)
         #Redis列表名称
-        self.redis_list_name = makeList.REDIS_PREFIX.format(self.start)
+        self.redis_list_name = REDIS_PREFIX + self.start
 
 
         #MYSQL Redis 连接池
@@ -78,7 +84,7 @@ class makeList(object):
 
             self.logger.info("[MySql]--插入任务数据，共[{}]条".format(self.totalPage))
             for i in range(self.totalPage):
-                cursor.execute(SQL_INSERT_TASK_LIST,[self.start,self.end,i])
+                cursor.execute(SQL_INSERT_TASK_LIST, [self.start, self.end, i])
                 if(i%10 == 0):
                     connection.commit()
             connection.commit()
@@ -103,8 +109,11 @@ class makeList(object):
         try:
             redis_client = redis.Redis(connection_pool=self.redis_connection_pool)
             for i in range(self.totalPage):
-                redis_client.lpush(self.redis_list_name,i)
+                redis_client.rpush(self.redis_list_name,i+1)
             self.logger.info("[Redis]--Redis任务队列构建成功")
+
+            self.logger.info("[Redis]--记录专利数目[{}]".format(self.totalCnt))
+            redis_client.set(REDIS_PREFIX_CNT +  self.start,self.totalCnt)
         except Exception as e:
             self.logger.error(e)
 
@@ -112,8 +121,10 @@ class makeList(object):
 
 
 if __name__ == "__main__":
-    make_list = makeList('2018-02-01','2018-02-01',100)
-    make_list.generate_mysql_list()
+    make_list = makeList('2019-01-01','2019-01-31',664056,13282)
+    #make_list.generate_mysql_list()
     make_list.generate_redis_list()
+
+
 
 
