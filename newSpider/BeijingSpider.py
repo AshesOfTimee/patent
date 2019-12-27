@@ -4,7 +4,11 @@ import redis
 import logging
 import fake_useragent
 import os
+import math
+import time
+import random
 from bs4 import BeautifulSoup
+from urllib3.exceptions import ReadTimeoutError
 
 from newSpider.KeenDBUtill import KeenDBUtill
 from newSpider.KeenRedisUtill import KeenRedisUtill
@@ -29,11 +33,13 @@ class BeijingSpider(object):
 
         # 返回的结果是否正确
         self.flag = False
+        self.is_cookie=False#是否正确获得cookie
 
         # 日志
         logging.basicConfig(level=logging.INFO, filename="beijingSpider.log", filemode='a',
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
+        self.logger.addHandler(logging.StreamHandler())
 
         # MYSQL Redis 连接池
         self.mysql_connection_pool = KeenDBUtill.get_connection_pool()
@@ -115,7 +121,7 @@ class BeijingSpider(object):
             totalCnt = int(redis_client.get(REDIS_PREFIX_CNT + self.start))
             cnt = totalCnt
             originTC = totalCnt
-            maxPage = totalCnt / 50
+            maxPage = math.ceil(totalCnt / 50)
 
             self.data['searchstr'] = searchstr
             self.data['maxPage'] = maxPage
@@ -135,12 +141,16 @@ class BeijingSpider(object):
         self.logger.info("更新cookie")
         u_search = "http://search.beijingip.cn/search/search/advance?t=0"
         self.session = requests.session()
-        for _ in range(5):
+        for i in range(5):
             try:
                 response_cookie = self.session.get(url=u_search, headers=self.headers, timeout=15)
                 if response_cookie.status_code == 200:
+                    self.logger.info("更新cookie成功")
+                    self.logger.info(requests.utils.dict_from_cookiejar(response_cookie.cookies))
+                    self.is_cookie=True
                     return
             except Exception as e:
+                self.logger.error("第{}次访问失败".format(i))
                 self.logger.error(e)
         self.logger.error("获取cookie失败，网站又抽风了")
 
@@ -160,6 +170,7 @@ class BeijingSpider(object):
                                      params=self.params,
                                      cookies=self.session.cookies,
                                      data=self.data,
+                                     timeout = 3,
                                      verify=False)
 
         return response
@@ -200,16 +211,23 @@ class BeijingSpider(object):
                     connection.close()
 
     def update_redis_detail(self, primary_key):
-        self.redis_client.lpop(self.redis_list_name)
-        self.redis_client.lpush(REDIS_PREFIX_DETAIL + self.start, primary_key)
+        self.redis_client.lpop(self.redis_list_name)#把爬取完毕的主键从队列里pop出来
+        self.redis_client.lpush(REDIS_PREFIX_DETAIL + self.start, primary_key)#把爬取完毕的主键放到Detail队列里
 
     def dispatch(self):
         cnt = 0
         self.logger.info("爬虫[{}]启动".format(self.start))
         while (True):
-            # 每隔十次重新更新一次cookie
+
+            # 每隔十次重新更新一次cookie,判断是否成功，只有成功才继续后续
             if (cnt % 10 == 0):
                 self.get_cookie()
+            #如果更新失败等待十分钟
+            if(self.is_cookie == False):
+                self.logger.info("更新cookie失败，等待十分钟")
+                time.sleep(10*60)
+                continue
+
 
             # 从任务队列取出任务
             page = None
@@ -222,21 +240,33 @@ class BeijingSpider(object):
             except Exception as e:
                 self.logger.error(e)
 
+
             # 如果page不为None说明任务队列里还有任务
             if page != None:
-                response = self.get_response(page)
-                self.parse_response(response)
-                self.check_response(response)
-                # 如果爬取成功，更新MySQL的content字段和Redis的任务队列
-                if self.flag == True and response != None:
-                    self.update_mysql_content(page, response)
-                    self.update_redis_detail(page)
+
+                MAX_RETRY=5#最大尝试次数
+                while(MAX_RETRY >= 0):
+                    try:
+                        response = self.get_response(page)
+                    except Exception:
+                        self.logger.error("第{}次访问超时".format(MAX_RETRY))
+                        MAX_RETRY-=1
+
+                    self.parse_response(response)
+                    self.check_response(response)
+                    # 如果爬取成功，更新MySQL的content字段和Redis的任务队列
+                    if self.flag == True and response != None:
+                        self.update_mysql_content(page, response)
+                        self.update_redis_detail(page)
+                        break
+
+
             else:
                 self.logger.info("日期[{}]已经爬取完毕!".format(self.start))
+                break
 
             cnt += 1
-            break
-
+            time.sleep(10)
 
 if __name__ == "__main__":
     spider = BeijingSpider('2019-01-01', '2019-01-31')
